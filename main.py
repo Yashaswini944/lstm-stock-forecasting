@@ -1,68 +1,37 @@
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
-from pydantic import BaseModel
 import numpy as np
+import onnxruntime as ort
 import joblib
-from tensorflow.keras.models import load_model
-from tensorflow.keras.losses import MeanSquaredError   # <-- ADD THIS
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # allow all frontends
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# Load TensorFlow model  <-- REPLACE THIS BLOCK
-model = load_model(
-    "model/lstm_stock_model.h5",
-    custom_objects={"mse": MeanSquaredError()},
-    compile=False
-)
-# -----------------------
+# Load ONNX model
+session = ort.InferenceSession("model/model.onnx")
 
 # Load scaler
-scaler = joblib.load("scaler/scaler.pkl")
+scaler = joblib.load("model/scaler.pkl")
 
-WINDOW_SIZE = 60
-
-class ForecastRequest(BaseModel):
-    days: int
+# Load last sequence
+last_sequence = np.load("model/last_sequence.npy")
 
 @app.get("/")
 def home():
-    return {"message": "TensorFlow LSTM Stock Forecasting API is running"}
+    return {"message": "LSTM Stock Forecasting API is running!"}
 
-@app.post("/predict")
-def predict(request: ForecastRequest):
-    days = request.days
-
-    # Load last sequence
-    try:
-        last_sequence = np.load("last_sequence.npy")
-    except:
-        return {"error": "last_sequence.npy not found"}
-
-    # Reshape for LSTM input
-    current_seq = last_sequence.reshape(1, WINDOW_SIZE, 1)
-
-    future_predictions = []
+@app.get("/predict")
+def predict(days: int = 5):
+    seq = last_sequence.reshape(1, 60, 1).astype(np.float32)
+    predictions = []
 
     for _ in range(days):
-        next_pred = model.predict(current_seq)[0][0]
-        future_predictions.append(next_pred)
+        inputs = {session.get_inputs()[0].name: seq}
+        pred = session.run(None, inputs)[0][0]
+        predictions.append(pred)
+        seq = np.append(seq[:, 1:, :], [[pred]], axis=1)
 
-        # Slide window forward
-        current_seq = np.append(current_seq[:, 1:, :], [[[next_pred]]], axis=1)
-
-    # Inverse scale predictions
-    future_predictions = scaler.inverse_transform(
-        np.array(future_predictions).reshape(-1, 1)
-    )
+    predictions = scaler.inverse_transform(predictions)
 
     return {
-        "days_requested": days,
-        "forecast": future_predictions.flatten().tolist()
+        "days": days,
+        "forecast": predictions.flatten().tolist()
     }
